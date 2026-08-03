@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-build_charts.py  —  Data4ThePeople weekly chart builder
+build_charts.py  —  Data4ThePeople weekly chart builder (Eric)
 ========================================================
 
 WHAT IT DOES
