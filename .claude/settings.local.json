@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(.venv/bin/python *)",
+      "Bash(/usr/bin/python3 -m venv /private/tmp/claude-501/-Users-ericpachman-PycharmProjects-CrackSpreadCalc/e4731a22-e82c-4b2d-a8ff-c91eeb6dff85/scratchpad/venv)",
+      "Bash(/private/tmp/claude-501/-Users-ericpachman-PycharmProjects-CrackSpreadCalc/e4731a22-e82c-4b2d-a8ff-c91eeb6dff85/scratchpad/venv/bin/pip install *)"
+    ]
+  }
+}
