@@ -1,0 +1,17 @@
+# Secrets — never commit
+.env
+
+# Auto-downloaded EIA workbook (fallback source) — re-fetched on demand,
+# no reason to churn an 800KB binary through git history every week
+input/
+
+# macOS
+.DS_Store
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+
+# PyCharm per-user state
+.idea/workspace.xml

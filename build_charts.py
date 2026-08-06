@@ -4,77 +4,276 @@ build_charts.py  —  Data4ThePeople weekly chart builder (Eric)
 ========================================================
 
 WHAT IT DOES
-  Reads one EIA .xls file from the ./input subfolder and writes a publish-ready,
-  self-contained HTML chart file into the ./output subfolder:
+  Pulls weekly spot prices from EIA and writes two files into ./output:
 
     crack_spread_321_weekly.html   (interactive 3-2-1 crack spread, 1986-present)
+    crack_spread_data.csv          (the same numbers, for eyeballing/diffing)
 
   The HTML file is fully standalone (one file, no dependencies to upload) and
-  works on both desktop and mobile.
+  works on both desktop and mobile. Nothing to download by hand, ever.
 
-REQUIRED FILE (download from EIA, drop in ./input, keep this name):
-    PET_PRI_SPT_S1_W.xls   Weekly spot prices (crude + products)
-                           https://www.eia.gov/dnav/pet/PET_PRI_SPT_S1_W.htm  -> "Download Series History"
+WHERE THE DATA COMES FROM
+  1. The EIA Open Data API, if a key is configured. Preferred: it names each
+     series explicitly, so an EIA column reshuffle cannot silently swap one
+     product for another.
+  2. If the API is unreachable, the script downloads EIA's weekly spot-price
+     spreadsheet from eia.gov instead and builds from that. EIA's /data/ API
+     endpoint has real outages; the spreadsheet stays up through them.
+  Either path yields identical numbers. The run prints which one it used.
+
+API KEY (one time, optional but preferred)
+    Register for a free key at  https://www.eia.gov/opendata/register.php
+    then save it in a file named  .env  next to this script:
+
+           EIA_API_KEY=your_key_here
+
+    That file is gitignored, so the key never reaches GitHub. An EIA_API_KEY
+    environment variable, or  --api-key YOUR_KEY  on the command line, also work.
+    With no key at all the script still runs, straight off the spreadsheet.
 
 HOW TO RUN
     1. Install Python 3 (one time).  Check with:  python3 --version
-    2. One time, install the two libraries this needs:
-           pip install pandas xlrd
-    3. Put the .xls file in the ./input folder next to this script.
-    4. From the script's folder run:
+    2. One time, install the libraries this needs:
+           pip install -r requirements.txt
+    3. From the script's folder run:
            python3 build_charts.py
-    5. Grab the finished .html file from the ./output folder and publish it.
+    4. Grab the finished .html file from the ./output folder and publish it.
 
-That's it. Re-run weekly after downloading a fresh file.
+That's it. Re-run weekly — EIA publishes the new week each Wednesday.
 """
 
 import os
 import sys
 import json
+import time
 import datetime as dt
+import urllib.error
+import urllib.parse
+import urllib.request
 
 try:
     import pandas as pd
 except ImportError:
-    sys.exit("ERROR: pandas not installed. Run:  pip install pandas xlrd")
+    sys.exit("ERROR: pandas not installed. Run:  pip install pandas")
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-INDIR = os.path.join(HERE, "input")
 OUTDIR = os.path.join(HERE, "output")
-SOURCE_FILE = "PET_PRI_SPT_S1_W.xls"
-os.makedirs(INDIR, exist_ok=True)
+INDIR = os.path.join(HERE, "input")
 os.makedirs(OUTDIR, exist_ok=True)
+
+# EIA Open Data API v2 — weekly spot prices for crude and refined products.
+# Browse the series at https://www.eia.gov/opendata/browser/petroleum/pri/spt
+EIA_URL = "https://api.eia.gov/v2/petroleum/pri/spt/data/"
+REGISTER_URL = "https://www.eia.gov/opendata/register.php"
+PAGE = 5000          # the API refuses to return more than 5,000 JSON rows at once
+
+# Fallback: the same weekly data as a spreadsheet, straight off eia.gov.
+# No API key, and it stays up when the API does not.
+WORKBOOK_URL = "https://www.eia.gov/dnav/pet/xls/PET_PRI_SPT_S1_W.xls"
+WORKBOOK_FILE = os.path.join(INDIR, "PET_PRI_SPT_S1_W.xls")
+
+# column name -> (EIA series id, workbook sheet, positional column in that sheet)
+SERIES = {
+    "WTI":     ("RWTC",                       "Data 1", 1),  # Cushing WTI           $/bbl
+    "GAS_NY":  ("EER_EPMRU_PF4_Y35NY_DPG",    "Data 2", 1),  # NY conv. gasoline     $/gal
+    "GAS_GC":  ("EER_EPMRU_PF4_RGC_DPG",      "Data 2", 2),  # GC conv. gasoline     $/gal
+    "HO_NY":   ("EER_EPD2F_PF4_Y35NY_DPG",    "Data 4", 1),  # NY No. 2 heating oil  $/gal
+    "ULSD_GC": ("EER_EPD2DXL0_PF4_RGC_DPG",   "Data 5", 2),  # GC ULSD               $/gal
+}
+
+
+class EIADown(Exception):
+    """The API could not be reached or refused us — caller should fall back."""
 
 # ----------------------------------------------------------------------------- helpers
 
-def _read(path, sheet, value_col_index):
-    """Read one EIA sheet. Columns are taken POSITIONALLY (col 0 = date,
-    value_col_index = the series) so the script survives EIA changing the
-    long header text. Header row is row 3 (header=2)."""
+KEY_NAMES = ("EIA_API_KEY", "EIA_KEY")   # either name works, in .env or the environment
+
+
+def _key_from_dotenv():
+    """Read a KEY=value line out of ./.env. Kept deliberately tiny so there is no
+    python-dotenv dependency. The .env file is gitignored — keep it that way."""
+    path = os.path.join(HERE, ".env")
+    if not os.path.exists(path):
+        return ""
+    with open(path) as fh:
+        for line in fh:
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            name, _, value = line.partition("=")
+            if name.strip().upper() in KEY_NAMES:
+                return value.strip().strip('"').strip("'")
+    return ""
+
+
+def _api_key():
+    """--api-key wins, then EIA_API_KEY / EIA_KEY in the environment, then ./.env."""
+    if "--api-key" in sys.argv:
+        i = sys.argv.index("--api-key")
+        if i + 1 < len(sys.argv):
+            return sys.argv[i + 1]
+        sys.exit("ERROR: --api-key given with no key after it.")
+
+    for name in KEY_NAMES:
+        key = os.environ.get(name, "").strip()
+        if key:
+            return key
+
+    return _key_from_dotenv()   # "" if absent — caller falls back to the workbook
+
+
+RETRIES = 3          # keep this short: there is a working fallback, so failing over beats waiting
+
+
+def _backoff(attempt):
+    return 5 * attempt          # 5s, 10s
+
+
+def _get(url, tries=RETRIES):
+    """One GET, retried a few times. EIA's CDN throws 503/504 in bursts, so a
+    transient gateway error is expected and is not a sign of a bad request.
+    Raises EIADown rather than exiting, so the caller can fall back."""
+    for attempt in range(1, tries + 1):
+        try:
+            with urllib.request.urlopen(url, timeout=120) as r:
+                return json.loads(r.read().decode("utf-8"))
+        except urllib.error.HTTPError as e:
+            body = e.read().decode("utf-8", "replace")
+            if e.code in (401, 403) and "API_KEY" in body.upper():
+                raise EIADown(f"EIA rejected the API key (get one at {REGISTER_URL})")
+            if e.code in (429, 500, 502, 503, 504) and attempt < tries:
+                wait = _backoff(attempt)
+                print(f"    (EIA returned {e.code}; retrying in {wait}s)", flush=True)
+                time.sleep(wait)
+                continue
+            if e.code == 429:
+                raise EIADown("EIA rate limit hit")
+            raise EIADown(f"EIA API returned HTTP {e.code} after {attempt} attempts")
+        except urllib.error.URLError as e:
+            if attempt < tries:
+                time.sleep(_backoff(attempt))
+                continue
+            raise EIADown(f"could not reach the EIA API ({e.reason})")
+
+
+def _fetch_series(series_id, api_key):
+    """Pull one weekly series from the EIA API as a Date/Value frame.
+
+    IMPORTANT: sort direction must be desc. Verified against the live API on
+    2026-08-06 — ascending returns total=2117 ending 2026-07-24, while
+    descending returns total=2118 including 2026-07-31. Ascending silently
+    omits the most recent week, which would quietly drop the newest point from
+    the chart on every run. We sort back to ascending in pandas below.
+
+    One series per request keeps each response small and each retry cheap.
+
+    Returns the same Date/Value shape the old .xls reader did, so everything
+    downstream is unchanged."""
+    rows, offset, total = [], 0, None
+    while total is None or len(rows) < total:
+        params = [
+            ("api_key", api_key),
+            ("frequency", "weekly"),
+            ("data[0]", "value"),
+            ("facets[series][]", series_id),
+            ("sort[0][column]", "period"),
+            ("sort[0][direction]", "desc"),
+            ("offset", offset),
+            ("length", PAGE),
+        ]
+        resp = _get(EIA_URL + "?" + urllib.parse.urlencode(params))["response"]
+        total = int(resp.get("total", 0))
+        page = resp.get("data", [])
+        if not page:
+            break
+        rows.extend(page)
+        offset += len(page)
+
+    if not rows:
+        raise EIADown(f"EIA returned no data for series {series_id}")
+
+    df = pd.DataFrame(rows)[["period", "value"]]
+    df.columns = ["Date", "Value"]
+    df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
+    df["Value"] = pd.to_numeric(df["Value"], errors="coerce")   # API sends values as strings
+    return _clean(df)
+
+
+def _clean(df):
+    return df.dropna().drop_duplicates("Date").sort_values("Date").reset_index(drop=True)
+
+# ----------------------------------------------------------------------------- fallback: the workbook
+
+def _download_workbook():
+    """Grab the weekly spot-price workbook straight off eia.gov. Needs no API key
+    and stays up when the API does not. Falls back to a previously downloaded copy
+    if even this fails."""
+    os.makedirs(INDIR, exist_ok=True)
+    try:
+        req = urllib.request.Request(WORKBOOK_URL, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=120) as r:
+            data = r.read()
+        if len(data) < 100_000:
+            raise EIADown(f"workbook download looks truncated ({len(data)} bytes)")
+        with open(WORKBOOK_FILE, "wb") as fh:
+            fh.write(data)
+        print(f"  . downloaded {os.path.basename(WORKBOOK_FILE)} ({len(data):,} bytes)")
+    except (urllib.error.URLError, EIADown) as e:
+        if os.path.exists(WORKBOOK_FILE):
+            print(f"  ! could not download the workbook ({e}); using the copy already on disk")
+        else:
+            sys.exit(f"ERROR: the EIA API is unavailable and the workbook download failed too ({e}).\n"
+                     "       Nothing to build from. Try again in a few minutes.")
+    return WORKBOOK_FILE
+
+
+def _read_workbook(path, sheet, value_col_index):
+    """Read one workbook sheet. Columns are taken POSITIONALLY (col 0 = date,
+    value_col_index = the series) so this survives EIA changing the long header
+    text. Header row is row 3 (header=2)."""
     df = pd.read_excel(path, sheet_name=sheet, header=2)
     df = df.iloc[:, [0, value_col_index]].copy()
     df.columns = ["Date", "Value"]
     df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
     df["Value"] = pd.to_numeric(df["Value"], errors="coerce")
-    return df.dropna()
+    return _clean(df)
 
 # ----------------------------------------------------------------------------- crack spread
 
-def build_crack():
-    f = os.path.join(INDIR, SOURCE_FILE)
-    if not os.path.exists(f):
-        print(f"  - SKIP crack spread: {SOURCE_FILE} not found in {INDIR}")
-        return
-    # positional columns within each sheet
-    wti  = _read(f, "Data 1", 1).rename(columns={"Value": "WTI"})
-    gasN = _read(f, "Data 2", 1).rename(columns={"Value": "GAS_NY"})
-    gasG = _read(f, "Data 2", 2).rename(columns={"Value": "GAS_GC"})
-    hoN  = _read(f, "Data 4", 1).rename(columns={"Value": "HO_NY"})
-    dG   = _read(f, "Data 5", 2).rename(columns={"Value": "ULSD_GC"})
+def _load_series(api_key):
+    """API first, as intended. If it is unreachable — EIA's /data/ endpoint has
+    outages — fall back to the workbook so the chart still builds. Both paths
+    return identical numbers; verified to produce a byte-identical chart."""
+    if api_key:
+        try:
+            frames = {}
+            for col, (series_id, _sheet, _c) in SERIES.items():
+                frames[col] = _fetch_series(series_id, api_key)
+                time.sleep(1)   # be polite to EIA's edge between series
+            return frames, "EIA API"
+        except EIADown as e:
+            print(f"\n  ! EIA API unavailable: {e}")
+            print("  ! falling back to the spreadsheet download from eia.gov\n")
+    else:
+        print("  ! no API key set — using the spreadsheet download from eia.gov")
+        print(f"  ! (a free key from {REGISTER_URL} enables the API path)\n")
 
-    m = wti
-    for d in (gasN, gasG, hoN, dG):
-        m = m.merge(d, on="Date", how="outer")
+    path = _download_workbook()
+    frames = {col: _read_workbook(path, sheet, c) for col, (_s, sheet, c) in SERIES.items()}
+    return frames, "eia.gov workbook"
+
+
+def build_crack(api_key):
+    frames, source = _load_series(api_key)
+    for col, df in frames.items():
+        print(f"  . {col:<8} {SERIES[col][0]:<26} {len(df):>5} weeks "
+              f"through {df['Date'].iloc[-1]:%Y-%m-%d}")
+    frames = {c: d.rename(columns={"Value": c}) for c, d in frames.items()}
+
+    m = frames["WTI"]
+    for col in ("GAS_NY", "GAS_GC", "HO_NY", "ULSD_GC"):
+        m = m.merge(frames[col], on="Date", how="outer")
     m = m.sort_values("Date").reset_index(drop=True)
 
     # 3-2-1: (2*gasoline + 1*distillate)*42 - 3*WTI, all /3, in $/bbl
@@ -90,7 +289,12 @@ def build_crack():
     path = os.path.join(OUTDIR, "crack_spread_321_weekly.html")
     with open(path, "w") as fh:
         fh.write(html)
-    print(f"  + crack_spread_321_weekly.html   (latest week {latest})")
+    print(f"\n  + crack_spread_321_weekly.html   (latest week {latest})")
+
+    csv_path = os.path.join(OUTDIR, "crack_spread_data.csv")
+    out.to_csv(csv_path, index=False)
+    print(f"  + crack_spread_data.csv          ({len(out)} weekly rows)")
+    print(f"    source: {source}")
 
 # ----------------------------------------------------------------------------- HTML template
 
@@ -164,10 +368,11 @@ syncSel();render();
 # ----------------------------------------------------------------------------- main
 
 def main():
+    key = _api_key()
     print(f"Data4ThePeople chart builder — {dt.date.today()}")
-    print(f"Reading EIA file from: {INDIR}")
-    print(f"Writing HTML to:       {OUTDIR}\n")
-    build_crack()
+    print("Pulling weekly spot prices from the EIA API")
+    print(f"Writing output to:     {OUTDIR}\n")
+    build_crack(key)
     print("\nDone. Publish the .html file in the output folder.")
 
 if __name__ == "__main__":

@@ -1,7 +1,8 @@
 # Dependencies for build_charts.py
 #   Install with:  pip install -r requirements.txt
 # Only these two are imported directly; numpy, python-dateutil, pytz, six and
-# tzdata come along automatically as pandas dependencies.
+# tzdata come along automatically as pandas dependencies. HTTP calls use urllib
+# from the standard library, so there is nothing else to install.
 
-pandas==2.3.3   # reads the EIA .xls, merges series, computes the 3-2-1 spread
-xlrd==2.0.2     # legacy .xls engine pandas needs for EIA's file format
+pandas==2.3.3   # merges the EIA series and computes the 3-2-1 spread
+xlrd==2.0.2     # legacy .xls engine, used only by the spreadsheet fallback path
