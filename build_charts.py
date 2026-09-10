@@ -93,17 +93,18 @@ KEY_NAMES = ("EIA_API_KEY", "EIA_KEY")   # either name works, in .env or the env
 def _key_from_dotenv():
     """Read a KEY=value line out of ./.env. Kept deliberately tiny so there is no
     python-dotenv dependency. The .env file is gitignored — keep it that way."""
-    path = os.path.join(HERE, ".env")
-    if not os.path.exists(path):
-        return ""
-    with open(path) as fh:
-        for line in fh:
-            line = line.strip()
-            if not line or line.startswith("#") or "=" not in line:
-                continue
-            name, _, value = line.partition("=")
-            if name.strip().upper() in KEY_NAMES:
-                return value.strip().strip('"').strip("'")
+    for path in (os.path.join(HERE, ".env"),
+                 os.path.expanduser("~/.claude/d4tp-process/.env")):  # central keys
+        if not os.path.exists(path):
+            continue
+        with open(path) as fh:
+            for line in fh:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                name, _, value = line.partition("=")
+                if name.strip().upper() in KEY_NAMES:
+                    return value.strip().strip('"').strip("'")
     return ""
 
 
