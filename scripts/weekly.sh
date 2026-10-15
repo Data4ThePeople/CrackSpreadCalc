@@ -37,6 +37,12 @@ if git diff --quiet -- output/crack_spread_data.csv; then
 fi
 
 IFS=, read -r week ny gc wti < <(tail -1 output/crack_spread_data.csv)
+# EIA can post some series before others (e.g. gasoline before WTI), which
+# leaves the newest row blank. Wait for the full week instead of pushing it.
+if [[ -z "$ny" || -z "$gc" || -z "$wti" ]]; then
+  echo "partial week $week (NY '$ny', GC '$gc', WTI '$wti'); not pushing"
+  git checkout -q -- output; exit 0
+fi
 git add output
 git commit -q -m "Refresh crack spread with EIA week ending $week
 
