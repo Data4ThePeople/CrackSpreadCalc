@@ -1,6 +1,7 @@
 #!/bin/zsh
-# Unattended weekly refresh, run by launchd (Wednesday 16:00, Thursday 11:00).
-# EIA posts the weekly spot prices on Wednesday; Thursday is the backup run.
+# Unattended weekly refresh, run by launchd (Wednesday 16:00, Thursday 11:00, Monday 11:00).
+# EIA posts the weekly spot prices on Wednesday; Thursday and Monday are backup runs
+# that catch a week EIA posts late.
 #   1. build_charts.py pulls the EIA series and rewrites output/.
 #   2. If the CSV changed: commit and push. GitHub Pages then serves the new
 #      chart at data4thepeople.github.io/CrackSpreadCalc/output/crack_spread_321_weekly.html

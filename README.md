@@ -14,7 +14,7 @@ A weekly chart of the U.S. 3-2-1 crack spread, a common rough measure of refinin
 - `output/crack_spread_data.csv`: the same weekly numbers as a table (date, NY Harbor spread, Gulf Coast spread, WTI price).
 - `requirements.txt`: the Python libraries the build needs.
 - `scripts/weekly.sh`: the unattended weekly refresh. It runs the build, and if a new full week of data arrived, commits and pushes the updated `output/` folder.
-- `scripts/org.data4thepeople.crackspread-weekly.plist`: the macOS launchd schedule that runs `weekly.sh` on Wednesday afternoon, with a backup run on Thursday morning.
+- `scripts/org.data4thepeople.crackspread-weekly.plist`: the macOS launchd schedule that runs `weekly.sh` on Wednesday afternoon, with backup runs on Thursday morning and Monday morning for weeks EIA posts late.
 
 ## Data sources
 
